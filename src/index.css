@@ -1,1 +1,79 @@
 @import "tailwindcss";
+
+@theme {
+  --color-bg-dark: #22252A;
+  --color-text-main: #FFFFFF;
+  --color-text-muted: #8E9299;
+  --color-accent: #00D1FF;
+}
+
+body {
+  background-color: var(--color-bg-dark);
+  color: var(--color-text-main);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  min-height: 100vh;
+  margin: 0;
+}
+
+/* Neumorphic Utilities */
+.neu-flat {
+  background: var(--color-bg-dark);
+  box-shadow: 10px 10px 20px #16181b, -10px -10px 20px #2e3239;
+  border-radius: 32px;
+}
+
+.neu-pressed {
+  background: var(--color-bg-dark);
+  box-shadow: inset 6px 6px 12px #16181b, inset -6px -6px 12px #2e3239;
+  border-radius: 20px;
+  border: none;
+}
+
+.neu-button {
+  background: var(--color-bg-dark);
+  box-shadow: 6px 6px 12px #16181b, -6px -6px 12px #2e3239;
+  border-radius: 50px;
+  transition: all 0.2s ease-in-out;
+  border: none;
+  color: var(--color-text-main);
+}
+
+.neu-button:hover:not(:disabled) {
+  box-shadow: 4px 4px 8px #16181b, -4px -4px 8px #2e3239;
+}
+
+.neu-button:active:not(:disabled) {
+  box-shadow: inset 4px 4px 8px #16181b, inset -4px -4px 8px #2e3239;
+}
+
+.neu-icon-btn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-dark);
+  box-shadow: 6px 6px 12px #16181b, -6px -6px 12px #2e3239;
+  transition: all 0.2s ease;
+  color: var(--color-text-muted);
+}
+
+.neu-icon-btn:active {
+  box-shadow: inset 4px 4px 8px #16181b, inset -4px -4px 8px #2e3239;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2e3239;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3f47;
+}
