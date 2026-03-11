@@ -1,0 +1,5 @@
+{
+  "name": "Web Crawler to PDF",
+  "description": "Crawl a website and its links, extract content, and generate a PDF document.",
+  "requestFramePermissions": []
+}
