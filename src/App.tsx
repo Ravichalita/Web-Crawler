@@ -99,12 +99,30 @@ export default function App() {
                 const chunk = linkData.slice(i, i + chunkSize);
                 const aiResponse = await ai.models.generateContent({
                   model: "gemini-3.1-flash-lite-preview",
-                  contents: `You are a web crawler assistant. Your job is to identify ONLY utility, administrative, or irrelevant pages that should NOT be crawled for content.
-Filter OUT: login, signup, password reset, user profile, settings, cart, checkout, terms of service, privacy policy, logs, history.
-KEEP (DO NOT filter out): homepages, articles, blog posts, documentation, product pages, about pages, contact pages, main navigation categories.
-Return a JSON array containing ONLY the 'url' strings of the links that should be FILTERED OUT. If all links are valid content, return an empty array [].
+                  contents: `Atue como um Analista Sênior de SEO e Engenheiro de Extração de Dados Web.
 
-Links to analyze:
+Seu Objetivo: Você receberá o código-fonte (HTML/Texto) de uma página web. Sua tarefa é analisar o contexto geral, identificar o assunto principal de forma inequívoca, extrair o conteúdo de valor alinhado a esse assunto e listar apenas os links que são úteis e canônicos para a composição de um Sitemap XML de alta qualidade.
+
+Regras de Processamento e Filtragem (Siga estritamente):
+
+Determinação de Contexto: Avalie as tags <title>, <h1>, <h2> e o corpo de texto principal. Resuma o assunto principal da página em uma ou duas frases.
+
+Limpeza de Ruído (Noise Reduction): Ignore sumariamente e NÃO inclua na sua análise qualquer texto ou link que pertença a:
+- Áreas de login, registro, "Esqueci minha senha" ou recuperação de conta.
+- Painéis de usuário, dashboards ou históricos de compras/navegação.
+- Seções de comentários, fóruns não moderados ou avaliações de usuários isoladas.
+- Rodapés genéricos (Termos de Uso, Políticas de Privacidade), a menos que o site seja puramente jurídico.
+- Elementos de interface (UI): "Clique aqui", "Leia mais", "Adicionar ao carrinho", menus de navegação repetitivos.
+
+Extração de Conteúdo Relevante: Separe apenas os parágrafos, artigos ou descrições técnicas que entreguem valor real sobre o "Assunto Principal" identificado no passo 1.
+
+Filtragem de Links para Sitemap: Extraia os URLs encontrados na página e filtre-os.
+MANTENHA: Links para artigos, categorias de produtos, páginas de serviços, "Sobre Nós" e conteúdos indexáveis.
+DESCARTE: Links com parâmetros de sessão (?sessionid=, &user=), links de paginação profunda desnecessária, links âncora (#comentarios), links de exclusão/carrinho (/cart, /checkout, /delete) e links externos irrelevantes.
+
+Apesar das instruções completas de análise acima (que guiam o seu raciocínio), sua SAÍDA DEVE SER EXCLUSIVAMENTE UM ARRAY JSON contendo as URLs que DEVEM SER DESCARTADAS (filtradas). Retorne um array vazio [] se todos os links forem válidos.
+
+Links para analisar:
 ${JSON.stringify(chunk)}`,
                   config: {
                     responseMimeType: "application/json",
