@@ -98,7 +98,7 @@ export default function App() {
               for (let i = 0; i < linkData.length; i += chunkSize) {
                 const chunk = linkData.slice(i, i + chunkSize);
                 const aiResponse = await ai.models.generateContent({
-                  model: "gemini-3-flash-preview",
+                  model: "gemini-3.1-flash-lite-preview",
                   contents: `You are a web crawler assistant. Your job is to identify ONLY utility, administrative, or irrelevant pages that should NOT be crawled for content.
 Filter OUT: login, signup, password reset, user profile, settings, cart, checkout, terms of service, privacy policy, logs, history.
 KEEP (DO NOT filter out): homepages, articles, blog posts, documentation, product pages, about pages, contact pages, main navigation categories.
