@@ -14,6 +14,7 @@ export default function App() {
   const [maxDepth, setMaxDepth] = useState(2);
   const [maxPagesIndex, setMaxPagesIndex] = useState(2); // Maps to 20
   const [useAIFilter, setUseAIFilter] = useState(false);
+  const [crawlMode, setCrawlMode] = useState<'manual' | 'express'>('manual');
   
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -271,6 +272,176 @@ ${JSON.stringify(chunk)}`,
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'An unknown error occurred');
       setStep('sitemap');
+    } finally {
+      setIsLoading(false);
+      setProgressText(null);
+    }
+  };
+
+  const handleExpressAutomated = async (format: 'pdf' | 'md') => {
+    const urlList = urls.split('\n').map(u => u.trim()).filter(u => u);
+    if (urlList.length === 0) {
+      setError("Please enter at least one valid URL");
+      return;
+    }
+
+    for (const u of urlList) {
+      try {
+        new URL(u);
+      } catch (e) {
+        setError(`Invalid URL format: ${u}`);
+        return;
+      }
+    }
+
+    setIsLoading(true);
+    setError(null);
+    setProgressText(`Starting Express Crawl & Extract to ${format.toUpperCase()}...`);
+    setProgressValue(0);
+    setProgressTotal(MAX_PAGES_MAP[maxPagesIndex]);
+    setSitemapNodes([]);
+    setSelectedUrls(new Set());
+    setStep('scraping'); 
+
+    let allPagesData: any[] = [];
+    let isSitemapDone = false;
+    let expressScrapingQueue: string[] = [];
+    let sitemapVisited: string[] = [];
+    let scrapeVisited: string[] = [];
+    let discoveredUrlsTracker: string[] = []; 
+
+    const actualMaxPages = MAX_PAGES_MAP[maxPagesIndex];
+
+    try {
+      const sitemapWorker = async () => {
+        let queue = urlList.map(u => ({ url: u, depth: 0 }));
+
+        while (queue.length > 0 && sitemapVisited.length < actualMaxPages) {
+          const response = await fetch('/api/sitemap-chunk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ queue, visited: sitemapVisited, maxDepth, maxPages: actualMaxPages, useAIFilter }),
+          });
+
+          if (!response.ok) throw new Error("Server error during express sitemap build");
+          
+          const data = await response.json();
+          let newDiscovered = data.discovered;
+          let newQueue = data.queue;
+          let newVisited = data.visited;
+
+          if (useAIFilter && process.env.GEMINI_API_KEY && newQueue.length > 0) {
+            try {
+              const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+              const linkData = newQueue.map((n: any) => ({ url: n.url, text: n.rawText || n.url }));
+              
+              if (linkData.length > 0) {
+                let aiFilteredUrls: string[] = [];
+                const chunkSize = 100;
+                
+                for (let i = 0; i < linkData.length; i += chunkSize) {
+                  const chunk = linkData.slice(i, i + chunkSize);
+                  const aiResponse = await ai.models.generateContent({
+                    model: "gemini-3.1-flash-lite-preview",
+                    contents: `Atue como um Analista Sênior de SEO e Engenheiro de Extração de Dados Web. Seu Objetivo: Retorne EXCLUSIVAMENTE UM ARRAY JSON contendo as URLs que DEVEM SER DESCARTADAS (login, senha, perfil, comentarios irrelevantes, etc). Retorne um array vazio [] se todos os links forem válidos. Links: ${JSON.stringify(chunk)}`,
+                    config: {
+                      responseMimeType: "application/json",
+                      responseSchema: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      temperature: 0.1
+                    }
+                  });
+                  const chunkFilteredUrls = JSON.parse(aiResponse.text || "[]");
+                  aiFilteredUrls = [...aiFilteredUrls, ...chunkFilteredUrls];
+                }
+
+                const itemsToFilter = newQueue.filter((q: any) => aiFilteredUrls.includes(q.url));
+                const filteredNodes = itemsToFilter.map((q: any) => ({
+                  url: q.url, title: q.rawText || q.url, depth: q.depth, parentUrl: q.parentUrl, isFiltered: true
+                }));
+
+                newDiscovered = [...newDiscovered, ...filteredNodes];
+                newQueue = newQueue.filter((q: any) => !aiFilteredUrls.includes(q.url));
+                newVisited = [...newVisited, ...aiFilteredUrls];
+              }
+            } catch (e) {
+              console.error("Gemini express filtering failed:", e);
+            }
+          }
+
+          const newlyApproved = newDiscovered.filter((n: any) => !n.isFiltered).map((n: any) => n.url);
+          // deduplicate just in case
+          for (const u of newlyApproved) {
+             if (!discoveredUrlsTracker.includes(u)) {
+                discoveredUrlsTracker.push(u);
+                expressScrapingQueue.push(u);
+             }
+          }
+          
+          queue = newQueue;
+          sitemapVisited = newVisited;
+        }
+        isSitemapDone = true;
+      };
+
+      const scrapingWorker = async () => {
+        while (!isSitemapDone || expressScrapingQueue.length > 0) {
+           if (expressScrapingQueue.length === 0) {
+               await new Promise(r => setTimeout(r, 500));
+               continue;
+           }
+           
+           const chunkToScrape = expressScrapingQueue.slice(0, 10);
+           const response = await fetch('/api/scrape-chunk', {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ queue: chunkToScrape.map(u => ({ url: u })), visited: scrapeVisited, format }),
+           });
+
+           if (!response.ok) throw new Error("Server error during express scraping");
+
+           const data = await response.json();
+           allPagesData = [...allPagesData, ...data.pagesData];
+           scrapeVisited = data.visited;
+           
+           const unprocessed = data.queue.map((q: any) => q.url);
+           expressScrapingQueue = [
+             ...unprocessed,
+             ...expressScrapingQueue.slice(chunkToScrape.length)
+           ];
+           setProgressText(`Express Crawl: Found ${sitemapVisited.length} links | Scraped ${allPagesData.length} pages`);
+           setProgressValue(allPagesData.length);
+        }
+      };
+
+      await Promise.all([sitemapWorker(), scrapingWorker()]);
+
+      if (allPagesData.length === 0) throw new Error("Could not extract any content from the site.");
+
+      setProgressText(`Generating ${format.toUpperCase()}...`);
+      setProgressValue(actualMaxPages);
+
+      const genResponse = await fetch('/api/generate-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pagesData: allPagesData, format, urlsToCrawl: urlList }),
+      });
+
+      if (!genResponse.ok) throw new Error("Server error during generation");
+
+      const blob = await genResponse.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      const urlObj = new URL(urlList[0]);
+      a.download = `express_crawled_${urlObj.hostname.replace('www.', '')}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(downloadUrl);
+      document.body.removeChild(a);
+      setStep('config');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'An unknown error occurred');
+      setStep('config');
     } finally {
       setIsLoading(false);
       setProgressText(null);
@@ -551,19 +722,80 @@ ${JSON.stringify(chunk)}`,
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={handleBuildSitemap}
-          disabled={isLoading || !urls.trim()}
-          className="neu-button w-full p-5 font-semibold text-lg flex items-center justify-center gap-3 text-[#00D1FF]"
-        >
-          {isLoading ? (
-            <Loader2 className="w-6 h-6 animate-spin" />
+        <section className="mb-12 flex flex-col gap-4">
+          <label className="block text-sm font-medium text-[#8E9299] uppercase tracking-wider pl-2 mb-2 text-center md:text-left">
+            Crawl Mode
+          </label>
+          <div className="flex bg-[#1a1c20] p-1 rounded-xl border border-[#2e3239]">
+            <button
+              type="button"
+              onClick={() => setCrawlMode('manual')}
+              className={`flex-1 py-3 text-sm font-medium rounded-lg transition-all ${
+                crawlMode === 'manual' 
+                  ? 'bg-[#2e3239] text-white shadow-sm' 
+                  : 'text-[#8E9299] hover:text-white'
+              }`}
+            >
+              Manual Curation
+            </button>
+            <button
+              type="button"
+              onClick={() => setCrawlMode('express')}
+              className={`flex-1 py-3 text-sm font-medium rounded-lg transition-all flex items-center justify-center gap-2 ${
+                crawlMode === 'express' 
+                  ? 'bg-[#00D1FF]/10 text-[#00D1FF] shadow-sm' 
+                  : 'text-[#8E9299] hover:text-[#00D1FF]/80'
+              }`}
+            >
+              Express Automated (Fast)
+            </button>
+          </div>
+
+          <div className="text-xs text-[#8E9299] px-2 text-center md:text-left mt-2 min-h-[40px]">
+            {crawlMode === 'manual' 
+              ? 'Build a sitemap tree first. You review and select which pages to download before extracting content.' 
+              : 'Skips the tree! Discovers and scrapes pages simultaneously in the background for maximum speed.'}
+          </div>
+        </section>
+
+        <div className="flex flex-col gap-4">
+          {crawlMode === 'manual' ? (
+            <button
+              type="button"
+              onClick={handleBuildSitemap}
+              disabled={isLoading || !urls.trim()}
+              className="neu-button w-full p-5 font-semibold text-lg flex items-center justify-center gap-3 text-[#00D1FF]"
+            >
+              {isLoading ? (
+                <Loader2 className="w-6 h-6 animate-spin" />
+              ) : (
+                <ListTree className="w-6 h-6" />
+              )}
+              {isLoading ? 'Processing...' : 'Build Sitemap to Select Pages'}
+            </button>
           ) : (
-            <ListTree className="w-6 h-6" />
+            <div className="flex flex-col sm:flex-row gap-4">
+              <button
+                type="button"
+                onClick={() => handleExpressAutomated('pdf')}
+                disabled={isLoading || !urls.trim()}
+                className="neu-button flex-1 p-5 font-semibold text-md flex items-center justify-center gap-2 text-[#00D1FF] hover:bg-[#00D1FF]/5"
+              >
+                {isLoading && progressText?.includes('Express') ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileText className="w-5 h-5" />}
+                {isLoading && progressText?.includes('Express') ? 'Scraping Pipeline...' : 'Express Extract to PDF'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExpressAutomated('md')}
+                disabled={isLoading || !urls.trim()}
+                className="neu-button flex-1 p-5 font-semibold text-md flex items-center justify-center gap-2 text-[#00D1FF] hover:bg-[#00D1FF]/5"
+              >
+                {isLoading && progressText?.includes('Express') ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileCode className="w-5 h-5" />}
+                {isLoading && progressText?.includes('Express') ? 'Scraping Pipeline...' : 'Express Extract to Markdown'}
+              </button>
+            </div>
           )}
-          {isLoading ? 'Processing...' : 'Build Sitemap'}
-        </button>
+        </div>
       </main>
     </div>
   );
