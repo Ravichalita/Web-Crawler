@@ -62,36 +62,40 @@ async function startServer() {
   const gracefulShutdown = async (signal: string) => {
     console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
     
-    if (browserInstance) {
-      console.log("Closing Puppeteer browser...");
-      await browserInstance.close();
-      browserInstance = null;
-    }
-    
-    if (vite) {
-      console.log("Closing Vite server...");
-      await vite.close();
-    }
-    
-    if (server) {
-      console.log("Shutting down Express server...");
-      server.close(() => {
-        console.log("Express server shut down.");
-        process.exit(0);
-      });
-    } else {
+    try {
+      if (browserInstance) {
+        console.log("Closing Puppeteer browser...");
+        await browserInstance.close();
+        browserInstance = null;
+      }
+      
+      if (vite) {
+        console.log("Closing Vite server...");
+        await vite.close();
+      }
+      
+      if (server) {
+        console.log("Shutting down Express server...");
+        await new Promise<void>((resolve) => {
+          server.close(() => {
+            console.log("Express server shut down.");
+            resolve();
+          });
+        });
+      }
+    } catch (err) {
+      console.error("Error during graceful shutdown:", err);
+    } finally {
+      console.log("Exiting process.");
       process.exit(0);
     }
-    
-    // Fallback exit if server.close hangs
-    setTimeout(() => {
-      console.error("Could not close connections in time, forcefully shutting down");
-      process.exit(1);
-    }, 5000);
   };
 
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+  // Special handling for some Windows terminals
+  process.on('SIGBREAK', () => gracefulShutdown('SIGBREAK'));
 
   app.use(express.json({ limit: '200mb' }));
   app.use(express.urlencoded({ limit: '200mb', extended: true }));

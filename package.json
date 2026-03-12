@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "tsx watch server.ts",
+    "predev": "node -e \"const c = require('child_process'); try { if (process.platform === 'win32') { const out = c.execSync('netstat -ano | findstr :3000').toString(); const pid = out.split(/\\s+/).find(s => s && !isNaN(s) && s !== '0'); if (pid) c.execSync('taskkill /F /PID ' + pid); } } catch(e) {}\"",
     "build": "vite build",
     "start": "node server.ts",
     "preview": "vite preview",
