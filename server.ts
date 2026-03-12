@@ -1,5 +1,6 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import path from "path";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import puppeteer, { Browser } from "puppeteer";
@@ -10,12 +11,33 @@ import { gfm } from "turndown-plugin-gfm";
 
 let browserInstance: Browser | null = null;
 const getBrowser = async () => {
-  if (!browserInstance) {
-    browserInstance = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-    });
+  try {
+    if (browserInstance) {
+      // Check if browser is still responsive
+      const pages = await browserInstance.pages();
+      if (pages.length === 0 && !browserInstance.isConnected()) {
+        console.log("Browser disconnected or unresponsive. Restarting...");
+        browserInstance = null;
+      }
+    }
+
+    if (!browserInstance) {
+      console.log("Launching new Puppeteer browser instance...");
+      browserInstance = await puppeteer.launch({
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+      });
+      
+      browserInstance.on('disconnected', () => {
+        console.log("Puppeteer browser disconnected.");
+        browserInstance = null;
+      });
+    }
+    return browserInstance;
+  } catch (error) {
+    console.error("Failed to get/launch browser:", error);
+    browserInstance = null;
+    throw error;
   }
-  return browserInstance;
 };
 
 const normalizeUrl = (urlStr: string) => {
@@ -34,8 +56,45 @@ const normalizeUrl = (urlStr: string) => {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  let vite: any;
+  let server: any;
 
-  app.use(express.json({ limit: '50mb' }));
+  const gracefulShutdown = async (signal: string) => {
+    console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
+    
+    if (browserInstance) {
+      console.log("Closing Puppeteer browser...");
+      await browserInstance.close();
+      browserInstance = null;
+    }
+    
+    if (vite) {
+      console.log("Closing Vite server...");
+      await vite.close();
+    }
+    
+    if (server) {
+      console.log("Shutting down Express server...");
+      server.close(() => {
+        console.log("Express server shut down.");
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+    
+    // Fallback exit if server.close hangs
+    setTimeout(() => {
+      console.error("Could not close connections in time, forcefully shutting down");
+      process.exit(1);
+    }, 5000);
+  };
+
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+  app.use(express.json({ limit: '200mb' }));
+  app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
   app.post("/api/sitemap-chunk", async (req, res) => {
     const { queue: initialQueue, visited: initialVisited, maxDepth = 1, maxPages = 10 } = req.body;
@@ -158,10 +217,10 @@ async function startServer() {
                 if (!queued.has(link.url) && !visited.has(link.url)) {
                   queued.add(link.url);
                   if (link.isFiltered) {
-                    discovered.push({ url: link.url, title: link.text, depth: depth + 1, parentUrl: currentUrl, isFiltered: true, rawText: link.rawText });
+                    discovered.push({ url: link.url, title: link.text, depth: depth + 1, parentUrl: currentUrl, isFiltered: true });
                     visited.add(link.url);
                   } else {
-                    queue.push({ url: link.url, depth: depth + 1, parentUrl: currentUrl, rawText: link.rawText });
+                    queue.push({ url: link.url, depth: depth + 1, parentUrl: currentUrl });
                   }
                 }
               }
@@ -229,173 +288,144 @@ async function startServer() {
             }
 
             if (format === 'pdf') {
-              const browser = await getBrowser();
-              const page = await browser.newPage();
-              
-              // Set viewport and user agent
-              await page.setViewport({ width: 1200, height: 800 });
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-              
-              await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 15000 });
-              
-              const actualUrl = normalizeUrl(page.url());
-              if (actualUrl !== normalizeUrl(currentUrl)) {
-                if (visited.has(actualUrl)) {
-                  await page.close();
-                  success = true;
-                  continue; // Skip this one, it's a duplicate redirect
-                }
-                visited.add(actualUrl);
-              }
-
-              const title = await page.title() || currentUrl;
-              
-              // Fix for lazy-loaded images (gray squares)
-              await page.evaluate(async () => {
-                // Force eager loading
-                document.querySelectorAll('img').forEach(img => {
-                  img.setAttribute('loading', 'eager');
-                  // Sometimes images have a data-src attribute for lazy loading scripts
-                  if (img.getAttribute('data-src')) {
-                    img.setAttribute('src', img.getAttribute('data-src') || '');
+              let page;
+              try {
+                const browser = await getBrowser();
+                page = await browser.newPage();
+                
+                // Set viewport and user agent
+                await page.setViewport({ width: 1200, height: 800 });
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+                await page.emulateMediaType('screen');
+                
+                await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+                
+                const actualUrl = normalizeUrl(page.url());
+                if (actualUrl !== normalizeUrl(currentUrl)) {
+                  if (visited.has(actualUrl)) {
+                    success = true;
+                    continue; // Skip this one, it's a duplicate redirect
                   }
-                });
-                
-                // Fast scroll to trigger IntersectionObservers
-                await new Promise<void>((resolve) => {
-                  let totalHeight = 0;
-                  const distance = 800;
-                  const timer = setInterval(() => {
-                    const scrollHeight = document.body.scrollHeight;
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    if (totalHeight >= scrollHeight) {
-                      clearInterval(timer);
-                      window.scrollTo(0, 0);
-                      resolve();
-                    }
-                  }, 50);
-                });
-                
-                // Wait for images to load
-                await new Promise(resolve => setTimeout(resolve, 800));
-              });
-              
-              // Remove irrelevant elements to clean up the PDF
-              await page.evaluate(() => {
-                const selectorsToRemove = [
-                  'nav', 'footer', 'header', 'aside', '.sidebar', '#sidebar', '.menu', '#menu',
-                  '.comments', '#comments', '#disqus_thread', '.social-share', '.share-buttons',
-                  '.related-posts', '.author-bio', '.cookie-banner', '#cookie-notice', '.modal',
-                  '.popup', '.login-form', 'iframe', 'form', 'input[type="password"]', 
-                  '[class*="login"]', '[id*="login"]', '[class*="register"]', '[id*="register"]', 
-                  '[class*="auth"]', '[id*="auth"]', '[class*="history"]', '[id*="history"]', 
-                  '[class*="log"]', '[id*="log"]', '[class*="audit"]', '[id*="audit"]',
-                  '[class*="user-profile"]', '[id*="user-profile"]'
-                ];
-                selectorsToRemove.forEach(selector => {
-                  try {
-                    document.querySelectorAll(selector).forEach(el => el.remove());
-                  } catch (e) {} // Ignore invalid selectors
-                });
-              });
+                  visited.add(actualUrl);
+                }
 
-              const pdfBuffer = await page.pdf({
-                format: 'A4',
-                printBackground: true,
-                margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' }
-              });
-              
-              await page.close();
-              
-              success = true;
-              pagesData.push({ 
-                url: currentUrl, 
-                title, 
-                content: Buffer.from(pdfBuffer).toString('base64') 
-              });
+                const title = await page.title() || currentUrl;
+                
+                // Inject CSS to ensure layout allows full document height rendering
+                await page.addStyleTag({ content: 'html, body { height: auto !important; min-height: 100vh !important; overflow: visible !important; }' });
+                
+                // Fix for lazy-loaded images (gray squares)
+                await page.evaluate(async () => {
+                  // Force eager loading
+                  document.querySelectorAll('img').forEach(img => {
+                    img.setAttribute('loading', 'eager');
+                    // Sometimes images have a data-src attribute for lazy loading scripts
+                    if (img.getAttribute('data-src')) {
+                      img.setAttribute('src', img.getAttribute('data-src') || '');
+                    }
+                  });
+                  
+                  // Fast scroll to trigger IntersectionObservers
+                  await new Promise<void>((resolve) => {
+                    let totalHeight = 0;
+                    const distance = 800;
+                    const timer = setInterval(() => {
+                      const scrollHeight = document.body.scrollHeight;
+                      window.scrollBy(0, distance);
+                      totalHeight += distance;
+                      if (totalHeight >= scrollHeight) {
+                        clearInterval(timer);
+                        resolve();
+                      }
+                    }, 50);
+                  });
+                  
+                  // Wait for images to load
+                  await new Promise(resolve => setTimeout(resolve, 800));
+                });
+                
+                const pdfBuffer = await page.pdf({
+                  format: 'A4',
+                  printBackground: true,
+                  margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' }
+                });
+                
+                success = true;
+                pagesData.push({ 
+                  url: currentUrl, 
+                  title, 
+                  content: Buffer.from(pdfBuffer).toString('base64') 
+                });
+              } finally {
+                if (page) await page.close().catch(e => console.error("Error closing page:", e));
+              }
             } else {
               // Markdown format using Puppeteer (Lightweight Mode)
-              const browser = await getBrowser();
-              const page = await browser.newPage();
-              
-              // Enable request interception to block heavy resources
-              await page.setRequestInterception(true);
-              page.on('request', (req) => {
-                const resourceType = req.resourceType();
-                if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-                  req.abort();
-                } else {
-                  req.continue();
-                }
-              });
-
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-              await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 15000 });
-              
-              const actualUrl = normalizeUrl(page.url());
-              if (actualUrl !== normalizeUrl(currentUrl)) {
-                if (visited.has(actualUrl)) {
-                  await page.close();
-                  success = true;
-                  continue; // Skip duplicate redirect
-                }
-                visited.add(actualUrl);
-              }
-
-              success = true;
-              const html = await page.content();
-              const title = await page.title() || currentUrl;
-              await page.close();
-
-              const $ = cheerio.load(html);
-              
-              // Semantic Cleaning
-              const selectorsToRemove = [
-                'script', 'style', 'nav', 'footer', 'header', 'aside', 'noscript', 'iframe', 'svg', 
-                'form', 'button', '.sidebar', '#sidebar', '.menu', '#menu', '.comments', '#comments', 
-                '#disqus_thread', '.social-share', '.share-buttons', '.related-posts', '.author-bio', 
-                '.cookie-banner', '#cookie-notice', '.modal', '.popup', '.login-form',
-                '[class*="login"]', '[id*="login"]', '[class*="register"]', '[id*="register"]', 
-                '[class*="auth"]', '[id*="auth"]', '[class*="history"]', '[id*="history"]', 
-                '[class*="log"]', '[id*="log"]', '[class*="audit"]', '[id*="audit"]',
-                '[class*="user-profile"]', '[id*="user-profile"]'
-              ];
-              
-              selectorsToRemove.forEach(selector => {
-                try {
-                  $(selector).remove();
-                } catch (e) {}
-              });
-              
-              // Isolate main content
-              let mainContentHtml = '';
-              if ($('article').length > 0) {
-                mainContentHtml = $('article').html() || '';
-              } else if ($('main').length > 0) {
-                mainContentHtml = $('main').html() || '';
-              } else if ($('[role="main"]').length > 0) {
-                mainContentHtml = $('[role="main"]').html() || '';
-              } else if ($('#content, .content, .wiki-content, #mw-content-text').length > 0) {
-                mainContentHtml = $('#content, .content, .wiki-content, #mw-content-text').html() || '';
-              }
-              
-              if (!mainContentHtml || mainContentHtml.trim().length < 100) {
-                  mainContentHtml = $('body').html() || '';
-              }
-
-              if (mainContentHtml) {
-                const turndownService = new TurndownService({ 
-                  headingStyle: 'atx', 
-                  codeBlockStyle: 'fenced',
-                  emDelimiter: '*'
+              let page;
+              try {
+                const browser = await getBrowser();
+                page = await browser.newPage();
+                
+                // Enable request interception to block heavy resources
+                await page.setRequestInterception(true);
+                page.on('request', (req) => {
+                  const resourceType = req.resourceType();
+                  if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                    req.abort();
+                  } else {
+                    req.continue();
+                  }
                 });
+
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+                await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 15000 });
                 
-                // Add GFM plugin for tables and strikethrough
-                turndownService.use(gfm);
+                const actualUrl = normalizeUrl(page.url());
+                if (actualUrl !== normalizeUrl(currentUrl)) {
+                  if (visited.has(actualUrl)) {
+                    success = true;
+                    continue; // Skip duplicate redirect
+                  }
+                  visited.add(actualUrl);
+                }
+
+                success = true;
+                const html = await page.content();
+                const title = await page.title() || currentUrl;
+
+                const $ = cheerio.load(html);
                 
-                const markdown = turndownService.turndown(mainContentHtml);
-                pagesData.push({ url: currentUrl, title, content: markdown });
+                // Isolate main content
+                let mainContentHtml = '';
+                if ($('article').length > 0) {
+                  mainContentHtml = $('article').html() || '';
+                } else if ($('main').length > 0) {
+                  mainContentHtml = $('main').html() || '';
+                } else if ($('[role="main"]').length > 0) {
+                  mainContentHtml = $('[role="main"]').html() || '';
+                } else if ($('#content, .content, .wiki-content, #mw-content-text').length > 0) {
+                  mainContentHtml = $('#content, .content, .wiki-content, #mw-content-text').html() || '';
+                }
+                
+                if (!mainContentHtml || mainContentHtml.trim().length < 100) {
+                    mainContentHtml = $('body').html() || '';
+                }
+
+                if (mainContentHtml) {
+                  const turndownService = new TurndownService({ 
+                    headingStyle: 'atx', 
+                    codeBlockStyle: 'fenced',
+                    emDelimiter: '*'
+                  });
+                  
+                  // Add GFM plugin for tables and strikethrough
+                  turndownService.use(gfm);
+                  
+                  const markdown = turndownService.turndown(mainContentHtml);
+                  pagesData.push({ url: currentUrl, title, content: markdown });
+                }
+              } finally {
+                if (page) await page.close().catch(e => console.error("Error closing page:", e));
               }
             }
           } catch (error) {
@@ -519,7 +549,7 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
@@ -543,9 +573,28 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`\n==================================================`);
     console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`Process ID: ${process.pid}`);
+    console.log(`==================================================\n`);
   });
+
+  server.on('error', (e: any) => {
+    if (e.code === 'EADDRINUSE') {
+      console.error(`\nFATAL ERROR: Port ${PORT} is already in use.`);
+      console.error(`Please close the other process or kill it manually.`);
+      console.error(`On Windows: netstat -ano | findstr :${PORT}`);
+      console.error(`Then: taskkill /F /PID <PID>\n`);
+      process.exit(1);
+    } else {
+      console.error("Server error:", e);
+    }
+  });
+
+  // Set higher timeout for large PDF generation (10 minutes)
+  server.timeout = 600000;
 }
 
 startServer();
